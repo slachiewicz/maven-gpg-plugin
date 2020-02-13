@@ -118,7 +118,7 @@ under the License.
       <!-- org.sonatype.aether.util.artifact.SubArtifact -->
       <groupId>org.sonatype.aether</groupId>
       <artifactId>aether-util</artifactId>
-      <version>1.7</version>
+      <version>1.13.1</version>
       <optional>true</optional>
     </dependency>
     <dependency>
