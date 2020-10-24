@@ -26,7 +26,7 @@ under the License.
     <artifactId>maven-plugins</artifactId>
     <groupId>org.apache.maven.plugins</groupId>
     <version>34</version>
-    <relativePath />
+    <relativePath/>
   </parent>
 
   <artifactId>maven-gpg-plugin</artifactId>
@@ -112,7 +112,7 @@ under the License.
       <!-- org.eclipse.aether.util.artifact.SubArtifact -->
       <groupId>org.apache.maven.resolver</groupId>
       <artifactId>maven-resolver-util</artifactId>
-      <version>1.4.1</version>
+      <version>1.4.2</version>
       <optional>true</optional>
     </dependency>
     <dependency>
