@@ -18,18 +18,16 @@
  */
 package org.apache.maven.plugins.gpg;
 
-import javax.inject.Inject;
-
 import java.io.File;
 import java.util.List;
 
-import org.apache.maven.plugin.MojoExecutionException;
-import org.apache.maven.plugin.MojoFailureException;
-import org.apache.maven.plugins.annotations.LifecyclePhase;
-import org.apache.maven.plugins.annotations.Mojo;
-import org.apache.maven.plugins.annotations.Parameter;
-import org.apache.maven.project.MavenProject;
-import org.apache.maven.project.MavenProjectHelper;
+import org.apache.maven.api.ProducedArtifact;
+import org.apache.maven.api.Project;
+import org.apache.maven.api.di.Inject;
+import org.apache.maven.api.plugin.MojoException;
+import org.apache.maven.api.plugin.annotations.Mojo;
+import org.apache.maven.api.plugin.annotations.Parameter;
+import org.apache.maven.api.services.ProjectManager;
 
 /**
  * Sign project artifact, the POM, and attached artifacts with GnuPG for deployment.
@@ -38,7 +36,7 @@ import org.apache.maven.project.MavenProjectHelper;
  * @author Jason Dillon
  * @author Daniel Kulp
  */
-@Mojo(name = "sign", defaultPhase = LifecyclePhase.VERIFY, threadSafe = true)
+@Mojo(name = "sign", defaultPhase = "verify")
 public class GpgSignAttachedMojo extends AbstractGpgMojo {
 
     /**
@@ -61,36 +59,28 @@ public class GpgSignAttachedMojo extends AbstractGpgMojo {
     /**
      * The maven project.
      */
-    protected final MavenProject project;
-
-    /**
-     * Maven ProjectHelper
-     */
-    private final MavenProjectHelper projectHelper;
-
     @Inject
-    public GpgSignAttachedMojo(MavenProject project, MavenProjectHelper projectHelper) {
-        this.project = project;
-        this.projectHelper = projectHelper;
-    }
+    protected Project project;
 
     @Override
-    protected void doExecute() throws MojoExecutionException, MojoFailureException {
+    protected void doExecute() throws MojoException {
         // ----------------------------------------------------------------------------
         // Collect files to sign
         // ----------------------------------------------------------------------------
 
-        FilesCollector collector = new FilesCollector(project, excludes, getLog());
+        FilesCollector collector = new FilesCollector(session, project, excludes, getLog());
         List<FilesCollector.Item> items = collector.collect();
 
         // ----------------------------------------------------------------------------
         // Sign collected files and attach all the signatures
         // ----------------------------------------------------------------------------
 
+        ProjectManager projectManager = session.getService(ProjectManager.class);
+
         AbstractGpgSigner signer = newSigner(project);
         signer.setOutputDirectory(ascDirectory);
         signer.setBuildDirectory(new File(project.getBuild().getDirectory()));
-        signer.setBaseDirectory(project.getBasedir());
+        signer.setBaseDirectory(project.getBasedir().toFile());
 
         getLog().info("Signer '" + signer.signerName() + "' is signing " + items.size() + " file"
                 + ((items.size() > 1) ? "s" : "") + " with key " + signer.getKeyInfo());
@@ -100,11 +90,14 @@ public class GpgSignAttachedMojo extends AbstractGpgMojo {
 
             File signature = signer.generateSignatureForArtifact(item.getFile());
 
-            projectHelper.attachArtifact(
-                    project,
-                    item.getExtension() + AbstractGpgSigner.SIGNATURE_EXTENSION,
+            ProducedArtifact artifact = session.createProducedArtifact(
+                    project.getGroupId(),
+                    project.getArtifactId(),
+                    project.getVersion(),
                     item.getClassifier(),
-                    signature);
+                    item.getExtension() + AbstractGpgSigner.SIGNATURE_EXTENSION,
+                    null);
+            projectManager.attachArtifact(project, artifact, signature.toPath());
         }
     }
 }

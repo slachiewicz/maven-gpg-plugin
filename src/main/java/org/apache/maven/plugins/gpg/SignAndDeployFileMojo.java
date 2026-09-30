@@ -18,43 +18,33 @@
  */
 package org.apache.maven.plugins.gpg;
 
-import javax.inject.Inject;
-
 import java.io.File;
-import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.io.InputStream;
-import java.io.OutputStream;
+import java.io.Writer;
 import java.nio.file.Files;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Optional;
+import java.util.regex.Pattern;
 
-import org.apache.maven.artifact.handler.ArtifactHandler;
-import org.apache.maven.artifact.handler.manager.ArtifactHandlerManager;
-import org.apache.maven.model.Model;
-import org.apache.maven.model.Parent;
-import org.apache.maven.model.building.DefaultModelBuildingRequest;
-import org.apache.maven.model.building.ModelBuildingRequest;
-import org.apache.maven.model.building.ModelProblem;
-import org.apache.maven.model.building.ModelProblemCollector;
-import org.apache.maven.model.building.ModelProblemCollectorRequest;
-import org.apache.maven.model.io.xpp3.MavenXpp3Reader;
-import org.apache.maven.model.io.xpp3.MavenXpp3Writer;
-import org.apache.maven.model.validation.ModelValidator;
-import org.apache.maven.plugin.MojoExecutionException;
-import org.apache.maven.plugin.MojoFailureException;
-import org.apache.maven.plugins.annotations.Mojo;
-import org.apache.maven.plugins.annotations.Parameter;
-import org.apache.maven.project.MavenProject;
+import org.apache.maven.api.ProducedArtifact;
+import org.apache.maven.api.RemoteRepository;
+import org.apache.maven.api.Type;
+import org.apache.maven.api.model.Model;
+import org.apache.maven.api.model.Parent;
+import org.apache.maven.api.plugin.MojoException;
+import org.apache.maven.api.plugin.annotations.Mojo;
+import org.apache.maven.api.plugin.annotations.Parameter;
+import org.apache.maven.api.services.ArtifactDeployer;
+import org.apache.maven.api.services.ArtifactDeployerException;
+import org.apache.maven.api.services.ArtifactDeployerRequest;
+import org.apache.maven.api.services.ArtifactManager;
+import org.apache.maven.api.services.TypeRegistry;
+import org.apache.maven.api.services.xml.ModelXmlFactory;
+import org.apache.maven.api.services.xml.XmlReaderException;
 import org.codehaus.plexus.util.FileUtils;
 import org.codehaus.plexus.util.StringUtils;
-import org.codehaus.plexus.util.xml.pull.XmlPullParserException;
-import org.eclipse.aether.RepositorySystem;
-import org.eclipse.aether.artifact.Artifact;
-import org.eclipse.aether.artifact.DefaultArtifact;
-import org.eclipse.aether.deployment.DeployRequest;
-import org.eclipse.aether.deployment.DeploymentException;
-import org.eclipse.aether.repository.RemoteRepository;
 
 /**
  * Signs artifacts and deploys the artifacts and signatures in the remote repository.
@@ -62,7 +52,7 @@ import org.eclipse.aether.repository.RemoteRepository;
  * @author Daniel Kulp
  * @since 1.0-beta-4
  */
-@Mojo(name = "sign-and-deploy-file", requiresProject = false, threadSafe = true)
+@Mojo(name = "sign-and-deploy-file", projectRequired = false)
 public class SignAndDeployFileMojo extends AbstractGpgMojo {
 
     /**
@@ -186,38 +176,11 @@ public class SignAndDeployFileMojo extends AbstractGpgMojo {
     @Parameter(property = "files")
     private String files;
 
-    private final RepositorySystem repositorySystem;
+    private static final Pattern VALID_ID = Pattern.compile("[A-Za-z0-9_\\-.]+");
 
-    /**
-     * The component used to validate the user-supplied artifact coordinates.
-     */
-    private final ModelValidator modelValidator;
+    private static final Pattern VALID_VERSION = Pattern.compile("[^/\\\\:<>\"|?*\\s]+");
 
-    /**
-     * The default Maven project created when building the plugin
-     *
-     * @since 1.3
-     */
-    private final MavenProject project;
-
-    /**
-     * @since 3.2.0
-     */
-    private final ArtifactHandlerManager artifactHandlerManager;
-
-    @Inject
-    public SignAndDeployFileMojo(
-            RepositorySystem repositorySystem,
-            ModelValidator modelValidator,
-            MavenProject project,
-            ArtifactHandlerManager artifactHandlerManager) {
-        this.repositorySystem = repositorySystem;
-        this.modelValidator = modelValidator;
-        this.project = project;
-        this.artifactHandlerManager = artifactHandlerManager;
-    }
-
-    private void initProperties() throws MojoExecutionException {
+    private void initProperties() throws MojoException {
         // Process the supplied POM (if there is one)
         if (pomFile != null) {
             generatePom = false;
@@ -233,9 +196,10 @@ public class SignAndDeployFileMojo extends AbstractGpgMojo {
     }
 
     @Override
-    protected void doExecute() throws MojoExecutionException, MojoFailureException {
+    @SuppressWarnings("checkstyle:MethodLength")
+    protected void doExecute() throws MojoException {
         if (session.getSettings().isOffline()) {
-            throw new MojoFailureException("Cannot deploy artifacts when Maven is in offline mode");
+            throw new MojoException("Cannot deploy artifacts when Maven is in offline mode");
         }
 
         initProperties();
@@ -243,28 +207,31 @@ public class SignAndDeployFileMojo extends AbstractGpgMojo {
         validateArtifactInformation();
 
         if (!file.exists()) {
-            throw new MojoFailureException(file.getPath() + " not found.");
+            throw new MojoException(file.getPath() + " not found.");
         }
 
         // create artifacts
-        List<Artifact> artifacts = new ArrayList<>();
+        ArtifactManager artifactManager = session.getService(ArtifactManager.class);
+        List<ProducedArtifact> artifacts = new ArrayList<>();
 
         // main artifact
-        ArtifactHandler handler = artifactHandlerManager.getArtifactHandler(packaging);
-        Artifact main = new DefaultArtifact(
-                        groupId,
-                        artifactId,
-                        classifier == null || classifier.trim().isEmpty() ? handler.getClassifier() : classifier,
-                        handler.getExtension(),
-                        version)
-                .setFile(file);
+        Optional<Type> handler = session.getService(TypeRegistry.class).lookup(packaging);
+        String mainClassifier = classifier == null || classifier.trim().isEmpty()
+                ? handler.map(Type::getClassifier).orElse(null)
+                : classifier;
+        ProducedArtifact main = session.createProducedArtifact(
+                groupId,
+                artifactId,
+                version,
+                mainClassifier,
+                handler.map(Type::getExtension).orElse(packaging),
+                null);
 
-        File localRepoFile = new File(
-                session.getRepositorySession().getLocalRepository().getBasedir(),
-                session.getRepositorySession().getLocalRepositoryManager().getPathForLocalArtifact(main));
+        File localRepoFile = session.getPathForLocalArtifact(main).toFile();
         if (file.equals(localRepoFile)) {
-            throw new MojoFailureException("Cannot deploy artifact from the local repository: " + file);
+            throw new MojoException("Cannot deploy artifact from the local repository: " + file);
         }
+        artifactManager.setPath(main, file.toPath());
         artifacts.add(main);
 
         if (!"pom".equals(packaging)) {
@@ -272,70 +239,76 @@ public class SignAndDeployFileMojo extends AbstractGpgMojo {
                 pomFile = generatePomFile();
             }
             if (pomFile != null) {
-                artifacts.add(
-                        new DefaultArtifact(main.getGroupId(), main.getArtifactId(), null, "pom", main.getVersion())
-                                .setFile(pomFile));
+                ProducedArtifact pom = session.createProducedArtifact(groupId, artifactId, version, null, "pom", null);
+                artifactManager.setPath(pom, pomFile.toPath());
+                artifacts.add(pom);
             }
         }
 
         if (sources != null) {
-            artifacts.add(
-                    new DefaultArtifact(main.getGroupId(), main.getArtifactId(), "sources", "jar", main.getVersion())
-                            .setFile(sources));
+            ProducedArtifact a = session.createProducedArtifact(groupId, artifactId, version, "sources", "jar", null);
+            artifactManager.setPath(a, sources.toPath());
+            artifacts.add(a);
         }
 
         if (javadoc != null) {
-            artifacts.add(
-                    new DefaultArtifact(main.getGroupId(), main.getArtifactId(), "javadoc", "jar", main.getVersion())
-                            .setFile(javadoc));
+            ProducedArtifact a = session.createProducedArtifact(groupId, artifactId, version, "javadoc", "jar", null);
+            artifactManager.setPath(a, javadoc.toPath());
+            artifacts.add(a);
         }
 
         if (files != null) {
             if (types == null) {
-                throw new MojoExecutionException("You must specify 'types' if you specify 'files'");
+                throw new MojoException("You must specify 'types' if you specify 'files'");
             }
             if (classifiers == null) {
-                throw new MojoExecutionException("You must specify 'classifiers' if you specify 'files'");
+                throw new MojoException("You must specify 'classifiers' if you specify 'files'");
             }
             String[] files = this.files.split(",", -1);
             String[] types = this.types.split(",", -1);
             String[] classifiers = this.classifiers.split(",", -1);
             if (types.length != files.length) {
-                throw new MojoExecutionException("You must specify the same number of entries in 'files' and "
+                throw new MojoException("You must specify the same number of entries in 'files' and "
                         + "'types' (respectively " + files.length + " and " + types.length + " entries )");
             }
             if (classifiers.length != files.length) {
-                throw new MojoExecutionException("You must specify the same number of entries in 'files' and "
+                throw new MojoException("You must specify the same number of entries in 'files' and "
                         + "'classifiers' (respectively " + files.length + " and " + classifiers.length + " entries )");
             }
             for (int i = 0; i < files.length; i++) {
                 File file = new File(files[i]);
                 if (!file.isFile()) {
-                    // try relative to the project basedir just in case
-                    file = new File(project.getBasedir(), files[i]);
+                    // try relative to the current directory just in case
+                    file = new File("")
+                            .getAbsoluteFile()
+                            .toPath()
+                            .resolve(files[i])
+                            .toFile();
                 }
                 if (file.isFile()) {
-                    Artifact artifact;
-                    String ext =
-                            artifactHandlerManager.getArtifactHandler(types[i]).getExtension();
-                    if (StringUtils.isWhitespace(classifiers[i])) {
-                        artifact = new DefaultArtifact(
-                                main.getGroupId(), main.getArtifactId(), null, ext, main.getVersion());
-                    } else {
-                        artifact = new DefaultArtifact(
-                                main.getGroupId(), main.getArtifactId(), classifiers[i], ext, main.getVersion());
-                    }
-                    artifacts.add(artifact.setFile(file));
+                    String ext = session.getService(TypeRegistry.class)
+                            .lookup(types[i])
+                            .map(Type::getExtension)
+                            .orElse(types[i]);
+                    ProducedArtifact artifact = session.createProducedArtifact(
+                            groupId,
+                            artifactId,
+                            version,
+                            StringUtils.isWhitespace(classifiers[i]) ? null : classifiers[i],
+                            ext,
+                            null);
+                    artifactManager.setPath(artifact, file.toPath());
+                    artifacts.add(artifact);
                 } else {
-                    throw new MojoExecutionException("Specified side artifact " + file + " does not exist");
+                    throw new MojoException("Specified side artifact " + file + " does not exist");
                 }
             }
         } else {
             if (types != null) {
-                throw new MojoExecutionException("You must specify 'files' if you specify 'types'");
+                throw new MojoException("You must specify 'files' if you specify 'types'");
             }
             if (classifiers != null) {
-                throw new MojoExecutionException("You must specify 'files' if you specify 'classifiers'");
+                throw new MojoException("You must specify 'files' if you specify 'classifiers'");
             }
         }
 
@@ -347,26 +320,36 @@ public class SignAndDeployFileMojo extends AbstractGpgMojo {
         getLog().info("Signer '" + signer.signerName() + "' is signing " + artifacts.size() + " file"
                 + ((artifacts.size() > 1) ? "s" : "") + " with key " + signer.getKeyInfo());
 
-        ArrayList<Artifact> signatures = new ArrayList<>();
-        for (Artifact a : artifacts) {
-            signatures.add(new DefaultArtifact(
-                            a.getGroupId(),
-                            a.getArtifactId(),
-                            a.getClassifier(),
-                            a.getExtension() + AbstractGpgSigner.SIGNATURE_EXTENSION,
-                            a.getVersion())
-                    .setFile(signer.generateSignatureForArtifact(a.getFile())));
+        List<ProducedArtifact> signatures = new ArrayList<>();
+        for (ProducedArtifact a : artifacts) {
+            ProducedArtifact signature = session.createProducedArtifact(
+                    a.getGroupId(),
+                    a.getArtifactId(),
+                    a.getVersion().toString(),
+                    a.getClassifier(),
+                    a.getExtension() + AbstractGpgSigner.SIGNATURE_EXTENSION,
+                    null);
+            artifactManager.setPath(
+                    signature,
+                    signer.generateSignatureForArtifact(
+                                    artifactManager.getPath(a).orElseThrow().toFile())
+                            .toPath());
+            signatures.add(signature);
         }
         artifacts.addAll(signatures);
 
         // deploy all
-        RemoteRepository deploymentRepository = repositorySystem.newDeploymentRepository(
-                session.getRepositorySession(), new RemoteRepository.Builder(repositoryId, "default", url).build());
+        RemoteRepository deploymentRepository = session.createRemoteRepository(repositoryId, url);
         try {
-            deploy(deploymentRepository, artifacts);
-        } catch (DeploymentException e) {
-            throw new MojoExecutionException(
-                    "Error deploying attached artifacts " + artifacts + ": " + e.getMessage(), e);
+            session.getService(ArtifactDeployer.class)
+                    .deploy(ArtifactDeployerRequest.builder()
+                            .session(session)
+                            .repository(deploymentRepository)
+                            .artifacts(artifacts)
+                            .retryFailedDeploymentCount(Math.max(1, Math.min(10, this.retryFailedDeploymentCount)))
+                            .build());
+        } catch (ArtifactDeployerException e) {
+            throw new MojoException("Error deploying attached artifacts " + artifacts + ": " + e.getMessage(), e);
         }
     }
 
@@ -403,17 +386,15 @@ public class SignAndDeployFileMojo extends AbstractGpgMojo {
      *
      * @param pomFile The path of the POM file to parse, must not be <code>null</code>.
      * @return The model from the POM file, never <code>null</code>.
-     * @throws MojoExecutionException If the file doesn't exist of cannot be read.
+     * @throws MojoException If the file doesn't exist of cannot be read.
      */
-    private Model readModel(File pomFile) throws MojoExecutionException {
+    private Model readModel(File pomFile) throws MojoException {
         try (InputStream inputStream = Files.newInputStream(pomFile.toPath())) {
-            return new MavenXpp3Reader().read(inputStream);
-        } catch (FileNotFoundException e) {
-            throw new MojoExecutionException("POM not found " + pomFile, e);
+            return session.getService(ModelXmlFactory.class).read(inputStream);
         } catch (IOException e) {
-            throw new MojoExecutionException("Error reading POM " + pomFile, e);
-        } catch (XmlPullParserException e) {
-            throw new MojoExecutionException("Error parsing POM " + pomFile, e);
+            throw new MojoException("Error reading POM " + pomFile, e);
+        } catch (XmlReaderException e) {
+            throw new MojoException("Error parsing POM " + pomFile, e);
         }
     }
 
@@ -421,48 +402,52 @@ public class SignAndDeployFileMojo extends AbstractGpgMojo {
      * Generates a minimal POM from the user-supplied artifact information.
      *
      * @return The path to the generated POM file, never <code>null</code>.
-     * @throws MojoExecutionException If the generation failed.
+     * @throws MojoException If the generation failed.
      */
-    private File generatePomFile() throws MojoExecutionException {
+    private File generatePomFile() throws MojoException {
         Model model = generateModel();
 
         try {
             File tempFile = Files.createTempFile("mvndeploy", ".pom").toFile();
             tempFile.deleteOnExit();
 
-            try (OutputStream outputStream = Files.newOutputStream(tempFile.toPath())) {
-                new MavenXpp3Writer().write(outputStream, model);
+            try (Writer writer = Files.newBufferedWriter(tempFile.toPath())) {
+                session.getService(ModelXmlFactory.class).write(model, writer);
             }
 
             return tempFile;
         } catch (IOException e) {
-            throw new MojoExecutionException("Error writing temporary pom file: " + e.getMessage(), e);
+            throw new MojoException("Error writing temporary pom file: " + e.getMessage(), e);
         }
     }
 
     /**
      * Validates the user-supplied artifact information.
      *
-     * @throws MojoFailureException If any artifact coordinate is invalid.
+     * @throws MojoException If any artifact coordinate is invalid.
      */
-    private void validateArtifactInformation() throws MojoFailureException {
-        Model model = generateModel();
-
-        ModelBuildingRequest request =
-                new DefaultModelBuildingRequest().setValidationLevel(ModelBuildingRequest.VALIDATION_LEVEL_STRICT);
-
+    private void validateArtifactInformation() throws MojoException {
         List<String> result = new ArrayList<>();
 
-        SimpleModelProblemCollector problemCollector = new SimpleModelProblemCollector(result);
-
-        modelValidator.validateEffectiveModel(model, request, problemCollector);
+        if (groupId == null || !VALID_ID.matcher(groupId).matches()) {
+            result.add("'groupId' is missing or uses invalid characters: " + groupId);
+        }
+        if (artifactId == null || !VALID_ID.matcher(artifactId).matches()) {
+            result.add("'artifactId' is missing or uses invalid characters: " + artifactId);
+        }
+        if (version == null || !VALID_VERSION.matcher(version).matches()) {
+            result.add("'version' is missing or uses invalid characters: " + version);
+        }
+        if (packaging == null || packaging.trim().isEmpty()) {
+            result.add("'packaging' is missing");
+        }
 
         if (!result.isEmpty()) {
             StringBuilder msg = new StringBuilder("The artifact information is incomplete or not valid:\n");
             for (String e : result) {
                 msg.append(" - " + e + '\n');
             }
-            throw new MojoFailureException(msg.toString());
+            throw new MojoException(msg.toString());
         }
     }
 
@@ -472,71 +457,13 @@ public class SignAndDeployFileMojo extends AbstractGpgMojo {
      * @return The generated model, never <code>null</code>.
      */
     private Model generateModel() {
-        Model model = new Model();
-
-        model.setModelVersion("4.0.0");
-
-        model.setGroupId(groupId);
-        model.setArtifactId(artifactId);
-        model.setVersion(version);
-        model.setPackaging(packaging);
-
-        model.setDescription(description);
-
-        return model;
-    }
-
-    /**
-     * Deploy an artifact from a particular file.
-     *
-     * @param deploymentRepository the repository to deploy to
-     * @param artifacts the artifacts definition
-     * @throws DeploymentException if an error occurred deploying the artifact
-     */
-    protected void deploy(RemoteRepository deploymentRepository, List<Artifact> artifacts) throws DeploymentException {
-        int retryFailedDeploymentCount = Math.max(1, Math.min(10, this.retryFailedDeploymentCount));
-        DeploymentException exception = null;
-        for (int count = 0; count < retryFailedDeploymentCount; count++) {
-            try {
-                if (count > 0) {
-                    // CHECKSTYLE_OFF: LineLength
-                    getLog().info("Retrying deployment attempt " + (count + 1) + " of " + retryFailedDeploymentCount);
-                    // CHECKSTYLE_ON: LineLength
-                }
-                DeployRequest deployRequest = new DeployRequest();
-                deployRequest.setRepository(deploymentRepository);
-                deployRequest.setArtifacts(artifacts);
-
-                repositorySystem.deploy(session.getRepositorySession(), deployRequest);
-                exception = null;
-                break;
-            } catch (DeploymentException e) {
-                if (count + 1 < retryFailedDeploymentCount) {
-                    getLog().warn("Encountered issue during deployment: " + e.getLocalizedMessage());
-                    getLog().debug(e);
-                }
-                if (exception == null) {
-                    exception = e;
-                }
-            }
-        }
-        if (exception != null) {
-            throw exception;
-        }
-    }
-
-    private static class SimpleModelProblemCollector implements ModelProblemCollector {
-
-        private final List<String> result;
-
-        SimpleModelProblemCollector(List<String> result) {
-            this.result = result;
-        }
-
-        public void add(ModelProblemCollectorRequest req) {
-            if (!ModelProblem.Severity.WARNING.equals(req.getSeverity())) {
-                result.add(req.getMessage());
-            }
-        }
+        return Model.newBuilder()
+                .modelVersion("4.0.0")
+                .groupId(groupId)
+                .artifactId(artifactId)
+                .version(version)
+                .packaging(packaging)
+                .description(description)
+                .build();
     }
 }

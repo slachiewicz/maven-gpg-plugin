@@ -18,28 +18,24 @@
  */
 package org.apache.maven.plugins.gpg;
 
-import javax.inject.Inject;
-
 import java.io.File;
+import java.nio.file.Files;
 import java.util.List;
+import java.util.Optional;
 
-import org.apache.maven.execution.MavenSession;
-import org.apache.maven.plugin.AbstractMojo;
-import org.apache.maven.plugin.MojoExecutionException;
-import org.apache.maven.plugin.MojoFailureException;
-import org.apache.maven.plugins.annotations.Parameter;
-import org.apache.maven.project.MavenProject;
-import org.apache.maven.settings.Server;
-import org.apache.maven.settings.Settings;
-import org.apache.maven.settings.building.SettingsProblem;
-import org.apache.maven.settings.crypto.DefaultSettingsDecryptionRequest;
-import org.apache.maven.settings.crypto.SettingsDecrypter;
-import org.apache.maven.settings.crypto.SettingsDecryptionResult;
+import org.apache.maven.api.Project;
+import org.apache.maven.api.Session;
+import org.apache.maven.api.di.Inject;
+import org.apache.maven.api.plugin.Log;
+import org.apache.maven.api.plugin.Mojo;
+import org.apache.maven.api.plugin.MojoException;
+import org.apache.maven.api.plugin.annotations.Parameter;
+import org.apache.maven.api.settings.Server;
 
 /**
  * @author Benjamin Bentmann
  */
-public abstract class AbstractGpgMojo extends AbstractMojo {
+public abstract class AbstractGpgMojo implements Mojo {
     public static final String DEFAULT_ENV_MAVEN_GPG_KEY = "MAVEN_GPG_KEY";
     public static final String DEFAULT_ENV_MAVEN_GPG_FINGERPRINT = "MAVEN_GPG_KEY_FINGERPRINT";
     public static final String DEFAULT_ENV_MAVEN_GPG_PASSPHRASE = "MAVEN_GPG_PASSPHRASE";
@@ -307,30 +303,23 @@ public abstract class AbstractGpgMojo extends AbstractMojo {
     private boolean terminatePassphrase;
 
     /**
-     * Current user system settings for use in Maven.
-     *
-     * @since 1.6
-     * @deprecated Use {@code session.getSettings()} instead (the Maven 4 API equivalent is
-     *             {@code org.apache.maven.api.Session#getSettings()}). Will be removed in the Maven 4 API line.
-     */
-    @Deprecated
-    @Parameter(defaultValue = "${settings}", readonly = true, required = true)
-    protected Settings settings;
-
-    /**
      * @since 3.0.0
      */
     @Inject
-    protected MavenSession session;
+    protected Session session;
 
     /**
-     * @since 3.2.6
+     * The logger of the plugin.
      */
     @Inject
-    protected SettingsDecrypter settingsDecrypter;
+    private Log log;
+
+    protected Log getLog() {
+        return log;
+    }
 
     @Override
-    public final void execute() throws MojoExecutionException, MojoFailureException {
+    public final void execute() throws MojoException {
         if (skip) {
             // We're skipping the signing stuff
             return;
@@ -347,17 +336,17 @@ public abstract class AbstractGpgMojo extends AbstractMojo {
         doExecute();
     }
 
-    protected void enforceBestPractices() throws MojoFailureException {
+    protected void enforceBestPractices() throws MojoException {
         // if any of those are not blank: meaning user did explicitly configure these
         if (isNotBlank(passphrase) || isNotBlank(passphraseServerId)) {
             // Stop propagating worst practices: passphrase MUST NOT be in any file on disk
-            throw new MojoFailureException(
+            throw new MojoException(
                     "Do not store passphrase in any file (disk or SCM repository), rely on GnuPG agent or provide passphrase in "
                             + passphraseEnvName + " environment variable.");
         }
     }
 
-    protected abstract void doExecute() throws MojoExecutionException, MojoFailureException;
+    protected abstract void doExecute() throws MojoException;
 
     private void logBestPracticeWarning(String source) {
         getLog().warn("");
@@ -371,7 +360,7 @@ public abstract class AbstractGpgMojo extends AbstractMojo {
         getLog().warn("");
     }
 
-    protected AbstractGpgSigner newSigner(MavenProject mavenProject) throws MojoFailureException {
+    protected AbstractGpgSigner newSigner(Project mavenProject) throws MojoException {
         AbstractGpgSigner signer = createSigner(this.signer);
 
         signer.setLog(getLog());
@@ -387,8 +376,7 @@ public abstract class AbstractGpgMojo extends AbstractMojo {
         signer.setTerminatePassphrase(terminatePassphrase);
 
         // "new way": env prevails
-        String passphrase =
-                (String) session.getRepositorySession().getConfigProperties().get("env." + passphraseEnvName);
+        String passphrase = BcSigner.getEnv(session, passphraseEnvName);
         if (isNotBlank(passphrase)) {
             signer.setPassPhrase(passphrase);
         } else if (!bestPractices) {
@@ -418,20 +406,15 @@ public abstract class AbstractGpgMojo extends AbstractMojo {
         return signer;
     }
 
-    protected AbstractGpgSigner createSigner(String name) throws MojoFailureException {
+    protected AbstractGpgSigner createSigner(String name) throws MojoException {
         AbstractGpgSigner signer;
         if (GpgSigner.NAME.equals(name)) {
             signer = new GpgSigner(executable);
         } else if (BcSigner.NAME.equals(name)) {
             signer = new BcSigner(
-                    session.getRepositorySession(),
-                    keyEnvName,
-                    keyFingerprintEnvName,
-                    agentSocketLocations,
-                    keyFilePath,
-                    keyFingerprint);
+                    session, keyEnvName, keyFingerprintEnvName, agentSocketLocations, keyFilePath, keyFingerprint);
         } else {
-            throw new MojoFailureException("Unknown signer: " + name);
+            throw new MojoException("Unknown signer: " + name);
         }
         return signer;
     }
@@ -446,56 +429,45 @@ public abstract class AbstractGpgMojo extends AbstractMojo {
     private static final String GPG_PASSPHRASE = "gpg.passphrase";
 
     @Deprecated
-    private String loadGpgPassphrase() throws MojoFailureException {
+    private String loadGpgPassphrase() throws MojoException {
         if (isNotBlank(passphraseServerId)) {
-            Server server = session.getSettings().getServer(passphraseServerId);
-            if (server != null) {
-                if (isNotBlank(server.getPassphrase())) {
-                    SettingsDecryptionResult result =
-                            settingsDecrypter.decrypt(new DefaultSettingsDecryptionRequest(server));
-                    for (SettingsProblem problem : result.getProblems()) {
-                        switch (problem.getSeverity()) {
-                            case WARNING:
-                            case ERROR:
-                                getLog().warn(problem.getMessage(), problem.getException());
-                                break;
-                            case FATAL:
-                                getLog().error(problem.getMessage(), problem.getException());
-                                throw new MojoFailureException(problem.getMessage(), problem.getException());
-                            default:
-                                throw new IllegalStateException("Unknown severity: "
-                                        + problem.getSeverity().toString());
-                        }
-                    }
-                    return result.getServer().getPassphrase();
+            Server server = session.getSettings().getServers().stream()
+                    .filter(s -> passphraseServerId.equals(s.getId()))
+                    .findFirst()
+                    .orElse(null);
+            if (server != null && isNotBlank(server.getPassphrase())) {
+                String value = server.getPassphrase();
+                // the Maven 4 API has no settings decryption service: refuse rather than sign with the cipher text
+                if (value.trim().matches("\\{.+\\}")) {
+                    throw new MojoException("The passphrase of server '" + passphraseServerId
+                            + "' in settings.xml is encrypted, which is not supported by the Maven 4 API."
+                            + " Provide the passphrase in the " + passphraseEnvName + " environment variable.");
                 }
+                return value;
             }
         }
         return null;
     }
 
     @Deprecated
-    public String getPassphrase(MavenProject project) {
+    public String getPassphrase(Project project) {
         String pass = null;
         if (project != null) {
-            pass = project.getProperties().getProperty(GPG_PASSPHRASE);
+            pass = project.getModel().getProperties().get(GPG_PASSPHRASE);
             if (pass == null) {
-                MavenProject prj2 = findReactorProject(project);
-                pass = prj2.getProperties().getProperty(GPG_PASSPHRASE);
+                pass = findReactorProject(project).getModel().getProperties().get(GPG_PASSPHRASE);
             }
-        }
-        if (project != null && pass != null) {
-            findReactorProject(project).getProperties().setProperty(GPG_PASSPHRASE, pass);
         }
         return pass;
     }
 
     @Deprecated
-    private MavenProject findReactorProject(MavenProject prj) {
-        if (prj.getParent() != null
-                && prj.getParent().getBasedir() != null
-                && prj.getParent().getBasedir().exists()) {
-            return findReactorProject(prj.getParent());
+    private Project findReactorProject(Project prj) {
+        Optional<Project> parent = prj.getParent();
+        if (parent.isPresent()
+                && parent.get().getBasedir() != null
+                && Files.exists(parent.get().getBasedir())) {
+            return findReactorProject(parent.get());
         }
         return prj;
     }

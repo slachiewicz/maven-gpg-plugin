@@ -22,7 +22,7 @@ import java.io.IOException;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
-import org.apache.maven.plugin.MojoExecutionException;
+import org.apache.maven.api.plugin.MojoException;
 import org.codehaus.plexus.util.Os;
 import org.codehaus.plexus.util.cli.CommandLineException;
 import org.codehaus.plexus.util.cli.CommandLineUtils;
@@ -53,7 +53,7 @@ public class GpgVersionParser {
         this.consumer = consumer;
     }
 
-    public static GpgVersionParser parse(String executable) throws MojoExecutionException {
+    public static GpgVersionParser parse(String executable) throws MojoException {
         Commandline cmd = new Commandline();
 
         if (executable != null && !executable.isEmpty()) {
@@ -69,7 +69,7 @@ public class GpgVersionParser {
         try {
             CommandLineUtils.executeCommandLine(cmd, null, out, null);
         } catch (CommandLineException e) {
-            throw new MojoExecutionException("failed to execute gpg", e);
+            throw new MojoException("failed to execute gpg", e);
         }
 
         return new GpgVersionParser(out);

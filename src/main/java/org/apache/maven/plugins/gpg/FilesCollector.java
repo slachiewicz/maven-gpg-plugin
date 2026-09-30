@@ -20,18 +20,21 @@ package org.apache.maven.plugins.gpg;
 
 import java.io.File;
 import java.io.IOException;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.List;
 
-import org.apache.maven.RepositoryUtils;
-import org.apache.maven.plugin.MojoExecutionException;
-import org.apache.maven.plugin.MojoFailureException;
-import org.apache.maven.plugin.logging.Log;
-import org.apache.maven.project.MavenProject;
+import org.apache.maven.api.Artifact;
+import org.apache.maven.api.Project;
+import org.apache.maven.api.Session;
+import org.apache.maven.api.plugin.Log;
+import org.apache.maven.api.plugin.MojoException;
+import org.apache.maven.api.services.ArtifactManager;
+import org.apache.maven.api.services.ProjectManager;
 import org.codehaus.plexus.util.FileUtils;
 import org.codehaus.plexus.util.SelectorUtils;
-import org.eclipse.aether.artifact.Artifact;
 
 import static java.util.Objects.requireNonNull;
 
@@ -41,7 +44,9 @@ import static java.util.Objects.requireNonNull;
  * @since 3.1.0
  */
 public class FilesCollector {
-    private final MavenProject project;
+    private final Session session;
+
+    private final Project project;
 
     private static final String[] DEFAULT_EXCLUDES = new String[] {
         "**/*.md5", "**/*.sha1", "**/*.sha256", "**/*.sha512", "**/*.asc", "**/.sigstore", "**/*.sigstore.json"
@@ -51,7 +56,8 @@ public class FilesCollector {
 
     private final Log log;
 
-    public FilesCollector(MavenProject project, String[] excludes, Log log) {
+    public FilesCollector(Session session, Project project, String[] excludes, Log log) {
+        this.session = session;
         this.project = project;
         this.log = log;
         if (excludes == null || excludes.length == 0) {
@@ -70,22 +76,27 @@ public class FilesCollector {
         this.excludes = newExcludes;
     }
 
-    public List<Item> collect() throws MojoExecutionException, MojoFailureException {
+    public List<Item> collect() throws MojoException {
         List<Item> items = new ArrayList<>();
+        ProjectManager projectManager = session.getService(ProjectManager.class);
+        ArtifactManager artifactManager = session.getService(ArtifactManager.class);
 
-        if (!"pom".equals(project.getPackaging())) {
+        Collection<? extends Artifact> attached = projectManager.getAttachedArtifacts(project);
+
+        if (!"pom".equals(project.getPackaging().id())) {
             // ----------------------------------------------------------------------------
             // Project artifact
             // ----------------------------------------------------------------------------
 
-            Artifact artifact = RepositoryUtils.toArtifact(project.getArtifact());
+            Path file = projectManager.getPath(project).orElse(null);
 
-            File file = artifact.getFile();
-
-            if (file != null && file.isFile()) {
-                items.add(new Item(file, null, artifact.getExtension()));
-            } else if (project.getAttachedArtifacts().isEmpty()) {
-                throw new MojoFailureException("The project artifact has not been assembled yet. "
+            if (file != null && Files.isRegularFile(file)) {
+                items.add(new Item(
+                        file.toFile(),
+                        null,
+                        project.getMainArtifact().map(Artifact::getExtension).orElseGet(() -> extensionOf(file))));
+            } else if (attached.isEmpty()) {
+                throw new MojoException("The project artifact has not been assembled yet. "
                         + "Please do not invoke this goal before the lifecycle phase \"package\".");
             } else {
                 log.debug("Main artifact not assembled, skipping signature generation");
@@ -100,9 +111,9 @@ public class FilesCollector {
                 new File(project.getBuild().getDirectory(), project.getBuild().getFinalName() + ".pom");
 
         try {
-            FileUtils.copyFile(project.getFile(), pomToSign);
+            FileUtils.copyFile(project.getPomPath().toFile(), pomToSign);
         } catch (IOException e) {
-            throw new MojoExecutionException("Error copying POM for signing.", e);
+            throw new MojoException("Error copying POM for signing.", e);
         }
 
         items.add(new Item(pomToSign, null, "pom"));
@@ -111,30 +122,37 @@ public class FilesCollector {
         // Attached artifacts
         // ----------------------------------------------------------------------------
 
-        for (Artifact artifact : RepositoryUtils.toArtifacts(project.getAttachedArtifacts())) {
-            File file = artifact.getFile();
+        for (Artifact artifact : attached) {
+            Path file = artifactManager.getPath(artifact).orElse(null);
+            if (file == null) {
+                continue;
+            }
 
-            if (isExcluded(artifact)) {
+            if (isExcluded(file)) {
                 log.debug("Skipping generation of signature for excluded " + file);
                 continue;
             }
 
-            items.add(new Item(file, artifact.getClassifier(), artifact.getExtension()));
+            items.add(new Item(file.toFile(), artifact.getClassifier(), artifact.getExtension()));
         }
 
         return items;
     }
 
+    private static String extensionOf(Path file) {
+        String name = file.getFileName().toString();
+        return name.substring(name.lastIndexOf('.') + 1);
+    }
+
     /**
      * Tests whether a name matches at least one exclude pattern.
      *
-     * @param artifact the artifact to match. Must not be <code>null</code>.
+     * @param artifactPath the file of the artifact to match. Must not be <code>null</code>.
      * @return <code>true</code> when the name matches at least one exclude pattern, or <code>false</code>
      *         otherwise.
      */
-    protected boolean isExcluded(Artifact artifact) {
-        final Path projectBasePath = project.getBasedir().toPath();
-        final Path artifactPath = artifact.getFile().toPath();
+    protected boolean isExcluded(Path artifactPath) {
+        final Path projectBasePath = project.getBasedir();
         final String relativeArtifactPath =
                 projectBasePath.relativize(artifactPath).toString();
 

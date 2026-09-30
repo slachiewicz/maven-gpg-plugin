@@ -18,8 +18,6 @@
  */
 package org.apache.maven.plugins.gpg;
 
-import javax.inject.Inject;
-
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.InvalidPathException;
@@ -28,33 +26,28 @@ import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
-import java.util.Collections;
-import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
-import org.apache.maven.plugin.MojoExecutionException;
-import org.apache.maven.plugin.MojoFailureException;
-import org.apache.maven.plugins.annotations.Mojo;
-import org.apache.maven.plugins.annotations.Parameter;
+import org.apache.maven.api.Artifact;
+import org.apache.maven.api.DownloadedArtifact;
+import org.apache.maven.api.ProducedArtifact;
+import org.apache.maven.api.RemoteRepository;
+import org.apache.maven.api.Session;
+import org.apache.maven.api.annotations.Nullable;
+import org.apache.maven.api.di.Inject;
+import org.apache.maven.api.plugin.MojoException;
+import org.apache.maven.api.plugin.annotations.Mojo;
+import org.apache.maven.api.plugin.annotations.Parameter;
+import org.apache.maven.api.services.ArtifactDeployer;
+import org.apache.maven.api.services.ArtifactDeployerException;
+import org.apache.maven.api.services.ArtifactDeployerRequest;
+import org.apache.maven.api.services.ArtifactManager;
+import org.apache.maven.api.services.ArtifactResolverException;
 import org.codehaus.plexus.util.FileUtils;
-import org.eclipse.aether.DefaultRepositorySystemSession;
-import org.eclipse.aether.RepositorySystem;
-import org.eclipse.aether.RepositorySystemSession;
-import org.eclipse.aether.RequestTrace;
-import org.eclipse.aether.artifact.Artifact;
-import org.eclipse.aether.artifact.DefaultArtifact;
-import org.eclipse.aether.deployment.DeployRequest;
-import org.eclipse.aether.deployment.DeploymentException;
-import org.eclipse.aether.repository.LocalRepository;
-import org.eclipse.aether.repository.RemoteRepository;
-import org.eclipse.aether.resolution.ArtifactRequest;
-import org.eclipse.aether.resolution.ArtifactResolutionException;
-import org.eclipse.aether.resolution.ArtifactResult;
-import org.eclipse.aether.util.artifact.SubArtifact;
 
 /**
  * Resolves given artifacts from a given remote repository, signs them, and deploys the signatures next to signed
@@ -63,7 +56,7 @@ import org.eclipse.aether.util.artifact.SubArtifact;
  *
  * @since 3.2.3
  */
-@Mojo(name = "sign-deployed", requiresProject = false, threadSafe = true)
+@Mojo(name = "sign-deployed", projectRequired = false)
 public class SignDeployedMojo extends AbstractGpgMojo {
 
     /**
@@ -105,40 +98,33 @@ public class SignDeployedMojo extends AbstractGpgMojo {
     @Parameter(property = "artifacts")
     private String artifacts;
 
-    private final RepositorySystem repositorySystem;
-
-    private final Map<String, ArtifactCollectorSPI> artifactCollectors;
-
     @Inject
-    public SignDeployedMojo(RepositorySystem repositorySystem, Map<String, ArtifactCollectorSPI> artifactCollectors) {
-        this.repositorySystem = repositorySystem;
-        this.artifactCollectors = artifactCollectors;
-    }
+    @Nullable
+    private Map<String, ArtifactCollectorSPI> artifactCollectors;
 
     @Override
-    protected void doExecute() throws MojoExecutionException, MojoFailureException {
+    protected void doExecute() throws MojoException {
         if (session.getSettings().isOffline()) {
-            throw new MojoFailureException("Cannot deploy artifacts when Maven is in offline mode");
+            throw new MojoException("Cannot deploy artifacts when Maven is in offline mode");
         }
 
         Path tempDirectory = null;
-        Set<Artifact> artifacts = new HashSet<>();
+        Map<String, Artifact> artifacts = new LinkedHashMap<>();
         try {
             tempDirectory = Files.createTempDirectory("gpg-sign-deployed");
             getLog().debug("Using temp directory " + tempDirectory);
 
-            DefaultRepositorySystemSession signingSession =
-                    new DefaultRepositorySystemSession(session.getRepositorySession());
-            signingSession.setLocalRepositoryManager(repositorySystem.newLocalRepositoryManager(
-                    signingSession, new LocalRepository(tempDirectory.toFile())));
+            // own local repository, to not "pollute" the user one
+            Session signingSession = session.withLocalRepository(session.createLocalRepository(tempDirectory));
 
             // remote repo where deployed artifacts are, and where signatures need to be deployed
-            RemoteRepository deploymentRepository = repositorySystem.newDeploymentRepository(
-                    signingSession, new RemoteRepository.Builder(repositoryId, "default", url).build());
+            RemoteRepository deploymentRepository = signingSession.createRemoteRepository(repositoryId, url);
 
             // get artifacts list
             getLog().debug("Collecting artifacts for signing...");
-            artifacts.addAll(collectArtifacts(signingSession, deploymentRepository));
+            for (Artifact a : collectArtifacts(signingSession, deploymentRepository)) {
+                artifacts.put(a.key(), a);
+            }
             getLog().info("Collected " + artifacts.size() + " artifact" + ((artifacts.size() > 1) ? "s" : "")
                     + " for signing");
 
@@ -146,61 +132,79 @@ public class SignDeployedMojo extends AbstractGpgMojo {
             if (sources || javadoc) {
                 getLog().debug("Adding additional artifacts...");
                 List<Artifact> additions = new ArrayList<>();
-                for (Artifact artifact : artifacts) {
+                for (Artifact artifact : artifacts.values()) {
                     if (artifact.getClassifier().isEmpty()) {
                         if (sources) {
-                            additions.add(new SubArtifact(artifact, "sources", "jar"));
+                            additions.add(signingSession.createArtifact(
+                                    artifact.getGroupId(),
+                                    artifact.getArtifactId(),
+                                    artifact.getVersion().toString(),
+                                    "sources",
+                                    "jar",
+                                    null));
                         }
                         if (javadoc) {
-                            additions.add(new SubArtifact(artifact, "javadoc", "jar"));
+                            additions.add(signingSession.createArtifact(
+                                    artifact.getGroupId(),
+                                    artifact.getArtifactId(),
+                                    artifact.getVersion().toString(),
+                                    "javadoc",
+                                    "jar",
+                                    null));
                         }
                     }
                 }
-                artifacts.addAll(additions);
+                additions.forEach(a -> artifacts.put(a.key(), a));
             }
 
             // resolve them all
             getLog().info("Resolving " + artifacts.size() + " artifact" + ((artifacts.size() > 1) ? "s" : "")
                     + " artifacts for signing...");
-            List<ArtifactResult> results = repositorySystem.resolveArtifacts(
-                    signingSession,
-                    artifacts.stream()
-                            .map(a -> new ArtifactRequest(a, Collections.singletonList(deploymentRepository), "gpg"))
-                            .collect(Collectors.toList()));
-            artifacts = results.stream().map(ArtifactResult::getArtifact).collect(Collectors.toSet());
+            Collection<DownloadedArtifact> resolved = signingSession.resolveArtifacts(
+                    artifacts.values().stream()
+                            .map(signingSession::createArtifactCoordinates)
+                            .collect(Collectors.toList()),
+                    List.of(deploymentRepository));
 
             // sign all
             AbstractGpgSigner signer = newSigner(null);
             signer.setOutputDirectory(tempDirectory.toFile());
-            getLog().info("Signer '" + signer.signerName() + "' is signing " + artifacts.size() + " file"
-                    + ((artifacts.size() > 1) ? "s" : "") + " with key " + signer.getKeyInfo());
+            getLog().info("Signer '" + signer.signerName() + "' is signing " + resolved.size() + " file"
+                    + ((resolved.size() > 1) ? "s" : "") + " with key " + signer.getKeyInfo());
 
-            HashSet<Artifact> signatures = new HashSet<>();
-            for (Artifact a : artifacts) {
-                signatures.add(new DefaultArtifact(
-                                a.getGroupId(),
-                                a.getArtifactId(),
-                                a.getClassifier(),
-                                a.getExtension() + AbstractGpgSigner.SIGNATURE_EXTENSION,
-                                a.getVersion())
-                        .setFile(signer.generateSignatureForArtifact(a.getFile())));
+            ArtifactManager artifactManager = signingSession.getService(ArtifactManager.class);
+            List<ProducedArtifact> signatures = new ArrayList<>();
+            for (DownloadedArtifact a : resolved) {
+                ProducedArtifact signature = signingSession.createProducedArtifact(
+                        a.getGroupId(),
+                        a.getArtifactId(),
+                        a.getVersion().toString(),
+                        a.getClassifier(),
+                        a.getExtension() + AbstractGpgSigner.SIGNATURE_EXTENSION,
+                        null);
+                artifactManager.setPath(
+                        signature,
+                        signer.generateSignatureForArtifact(a.getPath().toFile())
+                                .toPath());
+                signatures.add(signature);
             }
 
             // deploy all signature
             getLog().info("Deploying artifact signatures...");
-            repositorySystem.deploy(
-                    signingSession,
-                    new DeployRequest()
-                            .setRepository(deploymentRepository)
-                            .setArtifacts(signatures)
-                            .setTrace(RequestTrace.newChild(null, this)));
+            signingSession
+                    .getService(ArtifactDeployer.class)
+                    .deploy(ArtifactDeployerRequest.builder()
+                            .session(signingSession)
+                            .repository(deploymentRepository)
+                            .artifacts(signatures)
+                            .build());
         } catch (IOException e) {
-            throw new MojoExecutionException("IO error: " + e.getMessage(), e);
-        } catch (ArtifactResolutionException e) {
-            throw new MojoExecutionException(
-                    "Error resolving deployed artifacts " + artifacts + ": " + e.getMessage(), e);
-        } catch (DeploymentException e) {
-            throw new MojoExecutionException("Error deploying signatures: " + e.getMessage(), e);
+            throw new MojoException("IO error: " + e.getMessage(), e);
+        } catch (ArtifactResolverException e) {
+            throw new MojoException(
+                    "Error resolving deployed artifacts " + artifacts.keySet() + ": " + e.getMessage(), e);
+        } catch (ArtifactDeployerException e) {
+            throw new MojoException("Error deploying signatures: " + e.getMessage(), e);
         } finally {
             if (tempDirectory != null) {
                 getLog().info("Cleaning up...");
@@ -217,13 +221,15 @@ public class SignDeployedMojo extends AbstractGpgMojo {
      * Returns a collection of remotely deployed artifacts that needs to be signed and have signatures deployed
      * next to them.
      */
-    protected Collection<Artifact> collectArtifacts(RepositorySystemSession session, RemoteRepository remoteRepository)
+    protected Collection<Artifact> collectArtifacts(Session session, RemoteRepository remoteRepository)
             throws IOException {
         Collection<Artifact> result = null;
-        for (ArtifactCollectorSPI artifactCollector : artifactCollectors.values()) {
-            result = artifactCollector.collectArtifacts(session, remoteRepository);
-            if (result != null) {
-                break;
+        if (artifactCollectors != null) {
+            for (ArtifactCollectorSPI artifactCollector : artifactCollectors.values()) {
+                result = artifactCollector.collectArtifacts(session, remoteRepository);
+                if (result != null) {
+                    break;
+                }
             }
         }
         if (result == null) {
@@ -233,8 +239,8 @@ public class SignDeployedMojo extends AbstractGpgMojo {
                     if (Files.isRegularFile(path)) {
                         try (Stream<String> lines = Files.lines(path)) {
                             result = lines.filter(l -> !l.isEmpty() && !l.startsWith("#"))
-                                    .map(DefaultArtifact::new)
-                                    .collect(Collectors.toSet());
+                                    .map(l -> toArtifact(session, l))
+                                    .collect(Collectors.toList());
                         }
                     }
                 } catch (InvalidPathException e) {
@@ -242,8 +248,8 @@ public class SignDeployedMojo extends AbstractGpgMojo {
                 }
                 if (result == null) {
                     result = Arrays.stream(artifacts.split(","))
-                            .map(DefaultArtifact::new)
-                            .collect(Collectors.toSet());
+                            .map(l -> toArtifact(session, l))
+                            .collect(Collectors.toList());
                 }
             }
         }
@@ -251,5 +257,16 @@ public class SignDeployedMojo extends AbstractGpgMojo {
             throw new IllegalStateException("No source to collect from (set -Dartifacts=g:a:v... or add collector)");
         }
         return result;
+    }
+
+    private static Artifact toArtifact(Session session, String spec) {
+        org.apache.maven.api.ArtifactCoordinates c = session.createArtifactCoordinates(spec);
+        return session.createArtifact(
+                c.getGroupId(),
+                c.getArtifactId(),
+                c.getVersionConstraint().toString(),
+                c.getClassifier(),
+                c.getExtension(),
+                null);
     }
 }

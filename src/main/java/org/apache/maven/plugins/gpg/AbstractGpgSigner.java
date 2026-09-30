@@ -21,9 +21,8 @@ package org.apache.maven.plugins.gpg;
 import java.io.File;
 import java.util.List;
 
-import org.apache.maven.plugin.MojoExecutionException;
-import org.apache.maven.plugin.MojoFailureException;
-import org.apache.maven.plugin.logging.Log;
+import org.apache.maven.api.plugin.Log;
+import org.apache.maven.api.plugin.MojoException;
 
 /**
  * A base class for all classes that implements signing of files.
@@ -135,7 +134,7 @@ public abstract class AbstractGpgSigner {
      *
      * @since 3.2.0
      */
-    public void prepare() throws MojoFailureException {}
+    public void prepare() throws MojoException {}
 
     /**
      * Should return some identification about the used key for logging purposes.
@@ -151,9 +150,9 @@ public abstract class AbstractGpgSigner {
      *
      * @param file The file to sign
      * @return A reference to the generated signature file
-     * @throws MojoExecutionException if signature generation fails
+     * @throws MojoException if signature generation fails
      */
-    public File generateSignatureForArtifact(File file) throws MojoExecutionException {
+    public File generateSignatureForArtifact(File file) throws MojoException {
         // ----------------------------------------------------------------------------
         // Set up the file and directory for the signature file
         // ----------------------------------------------------------------------------
@@ -202,9 +201,9 @@ public abstract class AbstractGpgSigner {
      *
      * @param file The file to sign
      * @param signature The file in which the generate signature will be put
-     * @throws MojoExecutionException if signature generation fails
+     * @throws MojoException if signature generation fails
      */
-    protected abstract void generateSignatureForFile(File file, File signature) throws MojoExecutionException;
+    protected abstract void generateSignatureForFile(File file, File signature) throws MojoException;
 
     private boolean isPossibleRootOfArtifact(File signatureDirectory) {
         return signatureDirectory.equals(outputDir)

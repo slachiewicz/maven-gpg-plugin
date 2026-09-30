@@ -22,7 +22,7 @@ import java.io.ByteArrayInputStream;
 import java.io.File;
 import java.io.InputStream;
 
-import org.apache.maven.plugin.MojoExecutionException;
+import org.apache.maven.api.plugin.MojoException;
 import org.codehaus.plexus.util.Os;
 import org.codehaus.plexus.util.cli.CommandLineException;
 import org.codehaus.plexus.util.cli.CommandLineUtils;
@@ -54,7 +54,7 @@ public class GpgSigner extends AbstractGpgSigner {
      * {@inheritDoc}
      */
     @Override
-    protected void generateSignatureForFile(File file, File signature) throws MojoExecutionException {
+    protected void generateSignatureForFile(File file, File signature) throws MojoException {
         // ----------------------------------------------------------------------------
         // Set up the command line
         // ----------------------------------------------------------------------------
@@ -71,7 +71,7 @@ public class GpgSigner extends AbstractGpgSigner {
 
         GpgVersion gpgVersion = versionParser.getGpgVersion();
         if (gpgVersion == null) {
-            throw new MojoExecutionException("Could not determine gpg version");
+            throw new MojoException("Could not determine gpg version");
         }
 
         getLog().debug("GPG Version: " + gpgVersion);
@@ -190,10 +190,10 @@ public class GpgSigner extends AbstractGpgSigner {
             int exitCode = CommandLineUtils.executeCommandLine(cmd, in, new DefaultConsumer(), new DefaultConsumer());
 
             if (exitCode != 0) {
-                throw new MojoExecutionException("Exit code: " + exitCode);
+                throw new MojoException("Exit code: " + exitCode);
             }
         } catch (CommandLineException e) {
-            throw new MojoExecutionException("Unable to execute gpg command", e);
+            throw new MojoException("Unable to execute gpg command", e);
         }
     }
 }
