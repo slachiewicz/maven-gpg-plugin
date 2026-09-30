@@ -19,12 +19,11 @@
 package org.apache.maven.plugins.gpg;
 
 import java.io.File;
+import java.lang.reflect.Proxy;
+import java.util.Map;
 
+import org.apache.maven.api.Session;
 import org.bouncycastle.bcpg.PublicKeyAlgorithmTags;
-import org.eclipse.aether.DefaultRepositorySystemSession;
-import org.eclipse.aether.internal.impl.DefaultLocalPathComposer;
-import org.eclipse.aether.internal.impl.SimpleLocalRepositoryManagerFactory;
-import org.eclipse.aether.repository.LocalRepository;
 import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.Test;
 
@@ -34,6 +33,20 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
  * Tests for {@link BcSigner}.
  */
 class BcSignerTest {
+
+    /**
+     * A session that only knows about (empty) user and system properties, which is all the signer asks of it.
+     */
+    private static Session newSession() {
+        return (Session) Proxy.newProxyInstance(
+                BcSignerTest.class.getClassLoader(), new Class<?>[] {Session.class}, (proxy, method, args) -> {
+                    if (method.getName().equals("getUserProperties")
+                            || method.getName().equals("getSystemProperties")) {
+                        return Map.of();
+                    }
+                    throw new UnsupportedOperationException(method.getName());
+                });
+    }
 
     /**
      * Test for BC agent use. Disabled, as this test cannot run on CI, only on computer that have gpg-agent.
@@ -54,9 +67,7 @@ class BcSignerTest {
     @Disabled
     @Test
     void agent() throws Exception {
-        DefaultRepositorySystemSession session = new DefaultRepositorySystemSession();
-        session.setLocalRepositoryManager(new SimpleLocalRepositoryManagerFactory(new DefaultLocalPathComposer())
-                .newInstance(session, new LocalRepository("target/local-repo")));
+        Session session = newSession();
         // first: interactive session: it will pop up a pinentry dialogue, enter "TEST"
         BcSigner signer = new BcSigner(
                 session,
@@ -84,9 +95,7 @@ class BcSignerTest {
 
     @Test
     void singleKeyAscViaSubkeyFingerprint() throws Exception {
-        DefaultRepositorySystemSession session = new DefaultRepositorySystemSession();
-        session.setLocalRepositoryManager(new SimpleLocalRepositoryManagerFactory(new DefaultLocalPathComposer())
-                .newInstance(session, new LocalRepository("target/local-repo")));
+        Session session = newSession();
         BcSigner signer = new BcSigner(
                 session,
                 "unimportant",
@@ -106,9 +115,7 @@ class BcSignerTest {
 
     @Test
     void primaryKeyAsc() throws Exception {
-        DefaultRepositorySystemSession session = new DefaultRepositorySystemSession();
-        session.setLocalRepositoryManager(new SimpleLocalRepositoryManagerFactory(new DefaultLocalPathComposer())
-                .newInstance(session, new LocalRepository("target/local-repo")));
+        Session session = newSession();
         BcSigner signer = new BcSigner(
                 session,
                 "unimportant",
@@ -126,9 +133,7 @@ class BcSignerTest {
 
     @Test
     void firstSubkeyFromAsc() throws Exception {
-        DefaultRepositorySystemSession session = new DefaultRepositorySystemSession();
-        session.setLocalRepositoryManager(new SimpleLocalRepositoryManagerFactory(new DefaultLocalPathComposer())
-                .newInstance(session, new LocalRepository("target/local-repo")));
+        Session session = newSession();
         BcSigner signer = new BcSigner(
                 session,
                 "unimportant",
@@ -148,9 +153,7 @@ class BcSignerTest {
 
     @Test
     void secondSubkeyFromAsc() throws Exception {
-        DefaultRepositorySystemSession session = new DefaultRepositorySystemSession();
-        session.setLocalRepositoryManager(new SimpleLocalRepositoryManagerFactory(new DefaultLocalPathComposer())
-                .newInstance(session, new LocalRepository("target/local-repo")));
+        Session session = newSession();
         BcSigner signer = new BcSigner(
                 session,
                 "unimportant",
@@ -170,9 +173,7 @@ class BcSignerTest {
 
     @Test
     void keyFromKeyringFromConf() throws Exception {
-        DefaultRepositorySystemSession session = new DefaultRepositorySystemSession();
-        session.setLocalRepositoryManager(new SimpleLocalRepositoryManagerFactory(new DefaultLocalPathComposer())
-                .newInstance(session, new LocalRepository("target/local-repo")));
+        Session session = newSession();
         BcSigner signer = new BcSigner(
                 session,
                 "unimportant",

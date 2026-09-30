@@ -21,4 +21,4 @@ File buildLog = new File(basedir, "build.log")
 String logContent = new File(basedir, "build.log").text
 
 // assert that bestPractice+worstPractice => MojoFailure
-assert logContent.contains("MojoFailureException: Do not store passphrase in any file")
+assert logContent.contains("MojoException: Do not store passphrase in any file")

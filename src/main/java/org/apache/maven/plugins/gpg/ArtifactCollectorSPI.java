@@ -21,9 +21,9 @@ package org.apache.maven.plugins.gpg;
 import java.io.IOException;
 import java.util.Collection;
 
-import org.eclipse.aether.RepositorySystemSession;
-import org.eclipse.aether.artifact.Artifact;
-import org.eclipse.aether.repository.RemoteRepository;
+import org.apache.maven.api.Artifact;
+import org.apache.maven.api.RemoteRepository;
+import org.apache.maven.api.Session;
 
 /**
  * Artifact collector SPI, that collects artifacts in some way from given {@link RemoteRepository}.
@@ -36,6 +36,5 @@ public interface ArtifactCollectorSPI {
      * <p>
      * Collector should collect only <em>relevant artifacts</em>, those that are subject to signing.
      */
-    Collection<Artifact> collectArtifacts(RepositorySystemSession session, RemoteRepository remoteRepository)
-            throws IOException;
+    Collection<Artifact> collectArtifacts(Session session, RemoteRepository remoteRepository) throws IOException;
 }

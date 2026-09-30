@@ -39,8 +39,8 @@ import java.util.Locale;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
-import org.apache.maven.plugin.MojoExecutionException;
-import org.apache.maven.plugin.MojoFailureException;
+import org.apache.maven.api.Session;
+import org.apache.maven.api.plugin.MojoException;
 import org.bouncycastle.bcpg.ArmoredOutputStream;
 import org.bouncycastle.bcpg.BCPGOutputStream;
 import org.bouncycastle.bcpg.HashAlgorithmTags;
@@ -61,7 +61,6 @@ import org.bouncycastle.openpgp.operator.bc.BcPGPContentSignerBuilder;
 import org.bouncycastle.openpgp.operator.bc.BcPGPDigestCalculatorProvider;
 import org.bouncycastle.util.encoders.Hex;
 import org.codehaus.plexus.util.io.CachingOutputStream;
-import org.eclipse.aether.RepositorySystemSession;
 import org.newsclub.net.unix.AFUNIXSocket;
 import org.newsclub.net.unix.AFUNIXSocketAddress;
 
@@ -76,29 +75,39 @@ public class BcSigner extends AbstractGpgSigner {
         /**
          * Returns the key ring material, or {@code null}.
          */
-        default byte[] loadKeyRingMaterial(RepositorySystemSession session) throws IOException {
+        default byte[] loadKeyRingMaterial(Session session) throws IOException {
             return null;
         }
 
         /**
          * Returns the key fingerprint, or {@code null}.
          */
-        default byte[] loadKeyFingerprint(RepositorySystemSession session) throws IOException {
+        default byte[] loadKeyFingerprint(Session session) throws IOException {
             return null;
         }
 
         /**
          * Returns the key password, or {@code null}.
          */
-        default char[] loadPassword(RepositorySystemSession session, byte[] fingerprint) throws IOException {
+        default char[] loadPassword(Session session, byte[] fingerprint) throws IOException {
             return null;
         }
     }
 
+    /**
+     * Returns the value of the environment variable {@code name}, as exposed by Maven in the {@code env.} user or
+     * system properties, or {@code null}.
+     */
+    public static String getEnv(Session session, String name) {
+        String key = "env." + name;
+        String value = session.getUserProperties().get(key);
+        return value != null ? value : session.getSystemProperties().get(key);
+    }
+
     public final class GpgEnvLoader implements Loader {
         @Override
-        public byte[] loadKeyRingMaterial(RepositorySystemSession session) {
-            String keyMaterial = (String) session.getConfigProperties().get("env." + keyEnvName);
+        public byte[] loadKeyRingMaterial(Session session) {
+            String keyMaterial = getEnv(session, keyEnvName);
             if (keyMaterial != null) {
                 return keyMaterial.getBytes(StandardCharsets.UTF_8);
             }
@@ -106,8 +115,8 @@ public class BcSigner extends AbstractGpgSigner {
         }
 
         @Override
-        public byte[] loadKeyFingerprint(RepositorySystemSession session) {
-            String keyFingerprint = (String) session.getConfigProperties().get("env." + keyFingerprintEnvName);
+        public byte[] loadKeyFingerprint(Session session) {
+            String keyFingerprint = getEnv(session, keyFingerprintEnvName);
             if (keyFingerprint != null) {
                 if (keyFingerprint.trim().length() == 40) {
                     return Hex.decode(keyFingerprint);
@@ -132,7 +141,7 @@ public class BcSigner extends AbstractGpgSigner {
         private static final long MAX_SIZE = 64 * 1000 + 1L;
 
         @Override
-        public byte[] loadKeyRingMaterial(RepositorySystemSession session) throws IOException {
+        public byte[] loadKeyRingMaterial(Session session) throws IOException {
             Path keyPath = Paths.get(keyFilePath);
             if (!keyPath.isAbsolute()) {
                 keyPath = Paths.get(System.getProperty("user.home"))
@@ -150,7 +159,7 @@ public class BcSigner extends AbstractGpgSigner {
         }
 
         @Override
-        public byte[] loadKeyFingerprint(RepositorySystemSession session) {
+        public byte[] loadKeyFingerprint(Session session) {
             if (keyFingerprint != null) {
                 if (keyFingerprint.trim().length() == 40) {
                     return Hex.decode(keyFingerprint);
@@ -165,7 +174,7 @@ public class BcSigner extends AbstractGpgSigner {
 
     public final class GpgAgentPasswordLoader implements Loader {
         @Override
-        public char[] loadPassword(RepositorySystemSession session, byte[] fingerprint) throws IOException {
+        public char[] loadPassword(Session session, byte[] fingerprint) throws IOException {
             if (!useAgent) {
                 return null;
             }
@@ -246,7 +255,7 @@ public class BcSigner extends AbstractGpgSigner {
         }
     }
 
-    private final RepositorySystemSession session;
+    private final Session session;
     private final String keyEnvName;
     private final String keyFingerprintEnvName;
     private final String agentSocketLocations;
@@ -257,7 +266,7 @@ public class BcSigner extends AbstractGpgSigner {
     private PGPSignatureSubpacketVector hashSubPackets;
 
     public BcSigner(
-            RepositorySystemSession session,
+            Session session,
             String keyEnvName,
             String keyFingerprintEnvName,
             String agentSocketLocations,
@@ -277,7 +286,7 @@ public class BcSigner extends AbstractGpgSigner {
     }
 
     @Override
-    public void prepare() throws MojoFailureException {
+    public void prepare() throws MojoException {
         try {
             List<Loader> loaders = Stream.of(new GpgEnvLoader(), new GpgConfLoader(), new GpgAgentPasswordLoader())
                     .collect(Collectors.toList());
@@ -290,7 +299,7 @@ public class BcSigner extends AbstractGpgSigner {
                 }
             }
             if (keyRingMaterial == null) {
-                throw new MojoFailureException("Key ring material not found");
+                throw new MojoException("Key ring material not found");
             }
 
             byte[] fingerprint = null;
@@ -317,10 +326,10 @@ public class BcSigner extends AbstractGpgSigner {
                 }
             }
             if (secretKey == null) {
-                throw new MojoFailureException("Secret key not found");
+                throw new MojoException("Secret key not found");
             }
             if (secretKey.isPrivateKeyEmpty()) {
-                throw new MojoFailureException("Private key not found in Secret key");
+                throw new MojoException("Private key not found in Secret key");
             }
 
             long validSeconds = secretKey.getPublicKey().getValidSeconds();
@@ -333,7 +342,7 @@ public class BcSigner extends AbstractGpgSigner {
                         .toLocalDateTime()
                         .plusSeconds(validSeconds);
                 if (LocalDateTime.now().isAfter(expireDateTime)) {
-                    throw new MojoFailureException("Secret key expired at: " + expireDateTime);
+                    throw new MojoException("Secret key expired at: " + expireDateTime);
                 }
             }
 
@@ -347,7 +356,7 @@ public class BcSigner extends AbstractGpgSigner {
                     }
                 }
                 if (keyPassword == null) {
-                    throw new MojoFailureException("Secret key is encrypted but no passphrase provided");
+                    throw new MojoException("Secret key is encrypted but no passphrase provided");
                 }
             }
 
@@ -361,7 +370,7 @@ public class BcSigner extends AbstractGpgSigner {
             subPacketGenerator.setIssuerFingerprint(false, secretKey);
             this.hashSubPackets = subPacketGenerator.generate();
         } catch (PGPException | IOException e) {
-            throw new MojoFailureException(e);
+            throw new MojoException(e);
         }
     }
 
@@ -375,7 +384,7 @@ public class BcSigner extends AbstractGpgSigner {
     }
 
     @Override
-    protected void generateSignatureForFile(File file, File signature) throws MojoExecutionException {
+    protected void generateSignatureForFile(File file, File signature) throws MojoException {
         try (InputStream in = Files.newInputStream(file.toPath());
                 OutputStream out = new CachingOutputStream(signature.toPath())) {
             PGPSignatureGenerator sGen = new PGPSignatureGenerator(
@@ -391,7 +400,7 @@ public class BcSigner extends AbstractGpgSigner {
                 sGen.generate().encode(bcpgOutputStream);
             }
         } catch (PGPException | IOException e) {
-            throw new MojoExecutionException(e);
+            throw new MojoException(e);
         }
     }
 }
